@@ -1,0 +1,5 @@
+# Place your sprite sheet here as sprite.png
+# Default frame size: 192x192 px
+# Row 0: idle    (4 frames)
+# Row 1: typing  (6 frames)
+# Row 2: reading (5 frames)
