@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getWebviewContent } from './webview/getWebviewContent';
+import type { SpriteState, LogEntry } from './LogWatcher';
 
 /**
  * Manages the AI Office Webview Panel singleton.
@@ -30,14 +31,12 @@ export class AiOfficePanel {
       return;
     }
 
-    // Create a new panel.
     const panel = vscode.window.createWebviewPanel(
       AiOfficePanel.viewType,
       'AI Office',
       column ?? vscode.ViewColumn.One,
       {
         enableScripts: true,
-        // Restrict the webview to load resources from the extension's `media` directory.
         localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')],
         retainContextWhenHidden: true,
       }
@@ -51,6 +50,26 @@ export class AiOfficePanel {
   }
 
   // -------------------------------------------------------------------------
+  // Static forwarding methods (called by extension.ts from LogWatcher events)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Forward a sprite state change to the current panel.
+   * No-op if no panel is open.
+   */
+  public static forwardSpriteState(state: SpriteState): void {
+    AiOfficePanel._currentPanel?.setSpriteState(state);
+  }
+
+  /**
+   * Forward a parsed log entry to the current panel's log feed.
+   * No-op if no panel is open.
+   */
+  public static forwardLogEntry(entry: LogEntry, state: SpriteState, logPath?: string): void {
+    AiOfficePanel._currentPanel?.appendLog(entry, state, logPath);
+  }
+
+  // -------------------------------------------------------------------------
   // Instance methods
   // -------------------------------------------------------------------------
 
@@ -60,10 +79,8 @@ export class AiOfficePanel {
 
     this._update();
 
-    // Listen for when the panel is disposed (user closes it).
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
 
-    // Update content when the panel becomes visible again.
     this._panel.onDidChangeViewState(
       (_e) => {
         if (this._panel.visible) {
@@ -74,15 +91,11 @@ export class AiOfficePanel {
       this._disposables
     );
 
-    // Handle messages from the webview.
     this._panel.webview.onDidReceiveMessage(
       (message: { command: string; state?: string }) => {
         switch (message.command) {
           case 'alert':
             vscode.window.showInformationMessage(message.state ?? '');
-            break;
-          case 'setState':
-            // Future: persist sprite state via context.workspaceState
             break;
         }
       },
@@ -92,11 +105,27 @@ export class AiOfficePanel {
   }
 
   /**
-   * Send a message to the webview to switch the sprite state.
+   * Post a sprite state change to the webview.
    * Valid values: 'idle' | 'typing' | 'reading'
    */
-  public setSpriteState(state: 'idle' | 'typing' | 'reading'): void {
+  public setSpriteState(state: SpriteState): void {
     this._panel.webview.postMessage({ command: 'setSpriteState', state });
+  }
+
+  /**
+   * Append a parsed log entry to the webview's live log feed.
+   */
+  public appendLog(entry: LogEntry, state: SpriteState, logPath?: string): void {
+    this._panel.webview.postMessage({
+      command: 'appendLog',
+      logPath,
+      entry: {
+        action: entry.action,
+        detail: entry.detail ?? '',
+        ts: entry.ts ?? new Date().toISOString(),
+        state,
+      },
+    });
   }
 
   public dispose(): void {
