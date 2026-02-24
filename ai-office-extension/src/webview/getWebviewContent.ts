@@ -3,11 +3,19 @@ import * as vscode from 'vscode';
 /**
  * Returns the complete HTML document for the AI Office Webview Panel.
  *
- * Sprite sheet assumptions (replace with your actual asset):
- *   Frame size : 192 × 192 px
- *   idle       : row 0, 4 frames
- *   typing     : row 1, 6 frames
- *   reading    : row 2, 5 frames
+ * ── Sprite sheet spec (assets/character.png) ──────────────────────────────
+ *  FRAME_W / FRAME_H : native pixel size of ONE frame in the PNG
+ *  SCALE             : integer upscale factor (image-rendering: pixelated)
+ *  Displayed size    : FRAME_W*SCALE × FRAME_H*SCALE  px
+ *
+ *  Row layout (top → bottom):
+ *    row 0  idle     — 4 frames  (sitting still, breathing)
+ *    row 1  typing   — 6 frames  (paws hammering keyboard, fast)
+ *    row 2  reading  — 4 frames  (head tilting over book, slow)
+ *
+ *  If your PNG has different counts, change IDLE_FRAMES / TYPING_FRAMES /
+ *  READING_FRAMES in the JS SPRITE_CONFIG block below.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 export function getWebviewContent(
   webview: vscode.Webview,
@@ -15,8 +23,9 @@ export function getWebviewContent(
 ): string {
   const nonce = getNonce();
 
+  // character.png lives in assets/ (added to localResourceRoots in AiOfficePanel)
   const spriteUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, 'media', 'sprite.png')
+    vscode.Uri.joinPath(extensionUri, 'assets', 'character.png')
   );
 
   const csp = [
@@ -80,50 +89,28 @@ export function getWebviewContent(
       gap: 10px;
     }
 
+    /*
+     * .sprite — the clipping window for one frame.
+     * Width / height are set dynamically by JS (FRAME_W*SCALE × FRAME_H*SCALE).
+     * background-size is also set by JS to match the full scaled sheet.
+     * image-rendering:pixelated keeps pixel art crisp at any integer scale.
+     */
     .sprite {
-      width: 192px;
-      height: 192px;
       background-image: url('${spriteUri}');
       background-repeat: no-repeat;
       image-rendering: pixelated;
+      image-rendering: crisp-edges; /* Firefox fallback */
       border: 2px solid var(--border);
       border-radius: 12px;
+      /* width / height / background-size injected by initSprite() in JS */
     }
 
-    /* ------------------------------------------------------------------ */
-    /* CSS Keyframe animations (sprite sheet stepping)                       */
-    /* ------------------------------------------------------------------ */
-
-    /* idle — 4 frames, row 0 (y = 0 px) */
-    @keyframes sprite-idle {
-      0%   { background-position:    0px 0px; }
-      25%  { background-position: -192px 0px; }
-      50%  { background-position: -384px 0px; }
-      75%  { background-position: -576px 0px; }
-      100% { background-position:    0px 0px; }
-    }
-
-    /* typing — 6 frames, row 1 (y = -192 px) */
-    @keyframes sprite-typing {
-      0%      { background-position:    0px -192px; }
-      16.667% { background-position: -192px -192px; }
-      33.333% { background-position: -384px -192px; }
-      50%     { background-position: -576px -192px; }
-      66.667% { background-position: -768px -192px; }
-      83.333% { background-position: -960px -192px; }
-      100%    { background-position:    0px -192px; }
-    }
-
-    /* reading — 5 frames, row 2 (y = -384 px) */
-    @keyframes sprite-reading {
-      0%   { background-position:    0px -384px; }
-      20%  { background-position: -192px -384px; }
-      40%  { background-position: -384px -384px; }
-      60%  { background-position: -576px -384px; }
-      80%  { background-position: -768px -384px; }
-      100% { background-position:    0px -384px; }
-    }
-
+    /*
+     * @keyframes for each state are generated and injected by JS so that
+     * pixel offsets stay in sync with SPRITE_CONFIG automatically.
+     * Only the animation shorthand is declared here as a placeholder;
+     * JS overwrites it after computing the correct step-count & duration.
+     */
     .sprite.idle    { animation: sprite-idle    1.6s steps(1, end) infinite; }
     .sprite.typing  { animation: sprite-typing  0.6s steps(1, end) infinite; }
     .sprite.reading { animation: sprite-reading 2.4s steps(1, end) infinite; }
@@ -313,14 +300,80 @@ export function getWebviewContent(
     // ----------------------------------------------------------------
     const vscode = acquireVsCodeApi();
 
-    // ----------------------------------------------------------------
-    // Sprite configuration
-    // ----------------------------------------------------------------
-    const SPRITE_CONFIG = {
-      idle:    { label: 'idle — 發呆'    },
-      typing:  { label: 'typing — 打字'  },
-      reading: { label: 'reading — 讀取' },
+    // ================================================================
+    // SPRITE CONFIGURATION
+    // Adjust these values to match your character.png sprite sheet.
+    // ================================================================
+    const SPRITE = {
+      // ── Native frame dimensions (pixels in the PNG file) ──────────
+      FRAME_W: 48,   // width  of one frame  ← change to match your PNG
+      FRAME_H: 48,   // height of one frame  ← change to match your PNG
+
+      // ── Integer upscale factor ────────────────────────────────────
+      // Display size = FRAME_W*SCALE × FRAME_H*SCALE px
+      // 48×4 = 192 px  (crisp pixel art, same as before)
+      SCALE: 4,
+
+      // ── Total columns in the sheet (= widest row's frame count) ──
+      // Used to compute background-size width.
+      TOTAL_COLS: 6,
+
+      // ── Per-state animation rows ───────────────────────────────────
+      // row  : 0-based row index in the PNG
+      // frames : number of frames in that row
+      // durationMs : total loop duration in ms
+      // label : text shown in the state badge
+      states: {
+        idle:    { row: 0, frames: 4, durationMs: 1600, label: 'idle — 發呆'    },
+        typing:  { row: 1, frames: 6, durationMs:  600, label: 'typing — 打字'  },
+        reading: { row: 2, frames: 4, durationMs: 2400, label: 'reading — 讀取' },
+      },
     };
+    // ================================================================
+
+    // ----------------------------------------------------------------
+    // initSprite() — compute pixel geometry and inject @keyframes
+    // ----------------------------------------------------------------
+    function initSprite() {
+      var fw   = SPRITE.FRAME_W * SPRITE.SCALE;   // displayed frame width
+      var fh   = SPRITE.FRAME_H * SPRITE.SCALE;   // displayed frame height
+      var shW  = SPRITE.TOTAL_COLS * fw;           // full sheet width  at scale
+      var shH  = Object.keys(SPRITE.states).length * fh; // full sheet height at scale
+
+      // Size the sprite viewport
+      spriteEl.style.width           = fw + 'px';
+      spriteEl.style.height          = fh + 'px';
+      spriteEl.style.backgroundSize  = shW + 'px ' + shH + 'px';
+
+      // Build and inject @keyframes for every state
+      var css = '';
+      Object.keys(SPRITE.states).forEach(function (name) {
+        var cfg   = SPRITE.states[name];
+        var rowY  = -(cfg.row * fh);         // Y offset for this row
+        var steps = cfg.frames;
+        var pct   = 100 / steps;
+        var kf    = '@keyframes sprite-' + name + ' {\n';
+
+        for (var i = 0; i < steps; i++) {
+          var x   = -(i * fw);
+          var pct_val = (i * pct).toFixed(4);
+          kf += '  ' + pct_val + '% { background-position: ' + x + 'px ' + rowY + 'px; }\n';
+        }
+        // Loop-back keyframe at 100%
+        kf += '  100% { background-position: 0px ' + rowY + 'px; }\n}\n';
+
+        // Rewrite the animation shorthand on the state class
+        // (steps(N, end) makes it snap frame-by-frame, not interpolate)
+        kf += '.sprite.' + name + ' { animation: sprite-' + name + ' ' +
+          cfg.durationMs + 'ms steps(' + steps + ', end) infinite; }\n';
+
+        css += kf;
+      });
+
+      var styleTag = document.createElement('style');
+      styleTag.textContent = css;
+      document.head.appendChild(styleTag);
+    }
 
     // ----------------------------------------------------------------
     // DOM refs
@@ -336,18 +389,21 @@ export function getWebviewContent(
     let currentState = 'idle';
     const MAX_LOG_ROWS = 120;
 
+    // Initialise sprite geometry + inject computed @keyframes
+    initSprite();
+
     // ----------------------------------------------------------------
     // setSpriteState — single, authoritative state-change function
     // ----------------------------------------------------------------
     function setSpriteState(state) {
-      if (!SPRITE_CONFIG[state]) { return; }
+      if (!SPRITE.states[state]) { return; }
       currentState = state;
 
       spriteEl.classList.remove('idle', 'typing', 'reading');
       spriteEl.classList.add(state);
 
       badgeEl.className = 'state-badge ' + state;
-      badgeEl.textContent = SPRITE_CONFIG[state].label;
+      badgeEl.textContent = SPRITE.states[state].label;
 
       buttons.forEach(function (btn) {
         btn.classList.toggle('active', btn.dataset.state === state);
